@@ -18,7 +18,7 @@ module nanomsg.wrap;
 import nanomsg.bindings;
 import concepts: models;
 public import std.typecons: Yes, No; // to facilitate using send, receive
-
+import std.typecons : Flag;
 
 /// wrapper for a string uri to connect to
 struct ConnectTo {
@@ -386,24 +386,6 @@ private:
             : NanoBuffer();
     }
 
-    void enforceNanoMsgRet(E)(lazy E expr, string file = __FILE__, size_t line = __LINE__) @trusted const {
-        import std.conv: text;
-        const value = expr();
-        if(value < 0) {
-            version(NanomsgWrapperNoGcException) {
-                import nogc: NoGcException;
-                NoGcException.throwNewWithFileAndLine(
-                    file, line, "nanomsg expression failed with value ", numBytes,
-                    " errno ", nn_errno, ", error: ", nn_strerror(nn_errno));
-            } else {
-                throw new Exception(text("nanomsg expression failed with value ", value,
-                                         " errno ", nn_errno, ", error: ", nn_strerror(nn_errno)),
-                                    file,
-                                    line);
-            }
-        }
-    }
-
     // the int level and option values needed by the nanomsg C API
     static struct OptionC {
         int level;
@@ -506,6 +488,166 @@ private:
 
     static int flags(Flag!"blocking" blocking) @safe @nogc pure nothrow {
         return blocking ? 0 : NN_DONTWAIT;
+    }
+}
+
+int enforceNanoMsgRet(E)(lazy E expr, string file = __FILE__, size_t line = __LINE__) @trusted {
+    import std.conv: text;
+    const value = expr();
+    if(value < 0) {
+        version(NanomsgWrapperNoGcException) {
+            import nogc: NoGcException;
+            NoGcException.throwNewWithFileAndLine(
+                file, line, "nanomsg expression failed with value ", numBytes,
+                " errno ", nn_errno, ", error: ", nn_strerror(nn_errno));
+        } else {
+            throw new Exception(text("nanomsg expression failed with value ", value,
+                                     " errno ", nn_errno, ", error: ", nn_strerror(nn_errno)),
+                                file,
+                                line);
+        }
+    }
+    return value;
+}
+
+
+struct PollResult(Flag!"blocking" blocking = Yes.blocking)
+{
+    private NanoSocket* sock_;
+    private short idx_;
+
+    auto idx() @property
+    in (!timedOut, "Fetching idx for timed-out PollResult")
+    {
+        return idx_;
+    }
+
+    auto sock() @property
+    in (!timedOut, "Fetching sock for timed-out PollResult")
+    {
+        return sock_;
+    }
+
+    static if (blocking)
+        enum timedOut = false;
+    else
+        auto timedOut() @property
+        {
+            return idx_ == -1;
+        }
+
+    enum PollResult timedOutResult = PollResult(null, -1);
+}
+
+struct ReceivePoller(Flag!"blocking" blocking = Yes.blocking)
+{
+    private NanoSocket*[] sockets;
+    private nn_pollfd[] pds;
+    private PollResult!blocking front_;
+    static if (!blocking)
+        int timeoutMs;
+    enum empty = false;
+
+    static if (!blocking)
+        this(NanoSocket*[] sockets, int timeoutMs)
+        {
+            this.timeoutMs = timeoutMs;
+            initPds(sockets);
+        }
+    else
+        this(NanoSocket*[] sockets)
+        {
+            initPds(sockets);
+        }
+
+    private void initPds(NanoSocket*[] sockets)
+    {
+        import std.exception : enforce;
+
+        this.sockets = sockets;
+        auto mP = cast(nn_pollfd*)nn_allocmsg(nn_pollfd.sizeof * sockets.length, 0);
+        enforce(mP, "memory allocation failed");
+        pds = mP[0 .. sockets.length];
+        foreach (i, ref pd; pds)
+        {
+            pd.fd = sockets[i]._nanoSock;
+            pd.events = NN_POLLIN;
+            pd.revents = 0;
+        }
+        popFront();
+    }
+
+    auto front() @property
+    {
+        return front_;
+    }
+
+    void popFront()
+    {
+        import std.algorithm : countUntil;
+        import std.range : dropExactly;
+
+        bool findNextIdx(ref short idx)
+        {
+            auto found = pds
+                .dropExactly(idx)
+                .countUntil!(pd => bool(pd.revents & NN_POLLIN));
+            if (found >= 0)
+            {
+                idx += cast(short)found;
+                return true;
+            }
+            idx = cast(short)pds.length;
+            return false;
+        }
+
+        short idx = front.idx_;
+
+        if (front.timedOut || !findNextIdx(idx))
+        {
+            static if (!blocking)
+                int timeout = timeoutMs;
+            else
+                enum timeout = 1000;
+
+            while(nn_poll(pds.ptr, pds.length, timeout).enforceNanoMsgRet == 0)
+            {
+                static if (!blocking)
+                {
+                    front_ = PollResult!blocking.timedOutResult;
+                    return;
+                }
+            }
+
+            idx = 0;
+            auto r = findNextIdx(idx);
+            assert(r);
+        }
+
+        front_ = PollResult!blocking(sockets[idx], idx);
+        pds[idx].revents = nn_pollfd.init.revents;
+    }
+}
+
+auto receivePoll(NanoSocket*[] sockets)
+{
+    return ReceivePoller!(Yes.blocking)(sockets);
+}
+
+auto receivePoll(NanoSocket*[] sockets, int timeoutMs)
+{
+    return ReceivePoller!(No.blocking)(sockets, timeoutMs);
+}
+
+auto act(actions...)(PollResult p)
+{
+    switch (p.idx)
+    {
+        static foreach (i, action; actions)
+            case i:
+                return action(p.socket);
+            default:
+                assert(0, "no action for this case");
     }
 }
 
