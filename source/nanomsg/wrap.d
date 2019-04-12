@@ -19,6 +19,7 @@ import nanomsg.bindings;
 import concepts: models;
 public import std.typecons: Yes, No; // to facilitate using send, receive
 import std.typecons : Flag;
+import core.time : Duration;
 
 /// wrapper for a string uri to connect to
 struct ConnectTo {
@@ -541,6 +542,8 @@ struct PollResult(Flag!"blocking" blocking = Yes.blocking)
 
 struct ReceivePoller(Flag!"blocking" blocking = Yes.blocking)
 {
+    import core.time : Duration;
+
     private NanoSocket*[] sockets;
     private nn_pollfd[] pds;
     private PollResult!blocking front_;
@@ -549,9 +552,16 @@ struct ReceivePoller(Flag!"blocking" blocking = Yes.blocking)
     enum empty = false;
 
     static if (!blocking)
-        this(NanoSocket*[] sockets, int timeoutMs)
+        this(NanoSocket*[] sockets, Duration timeout)
         {
-            this.timeoutMs = timeoutMs;
+            import std.math : lrint;
+            import core.time : tdTo = to, TickDuration;
+            import std.conv : to;
+
+            this.timeoutMs = (cast(TickDuration)timeout)
+                .tdTo!("msecs", double)
+                .lrint
+                .to!int;
             initPds(sockets);
         }
     else
@@ -634,9 +644,9 @@ auto receivePoll(NanoSocket*[] sockets)
     return ReceivePoller!(Yes.blocking)(sockets);
 }
 
-auto receivePoll(NanoSocket*[] sockets, int timeoutMs)
+auto receivePoll(NanoSocket*[] sockets, Duration timeout)
 {
-    return ReceivePoller!(No.blocking)(sockets, timeoutMs);
+    return ReceivePoller!(No.blocking)(sockets, timeout);
 }
 
 auto act(actions...)(PollResult p)
