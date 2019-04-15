@@ -596,6 +596,7 @@ struct ReceivePoller(Flag!"blocking" blocking = Yes.blocking)
     {
         import std.algorithm : countUntil;
         import std.range : dropExactly;
+        import std.conv : to;
 
         bool findNextIdx(ref short idx)
         {
@@ -620,7 +621,7 @@ struct ReceivePoller(Flag!"blocking" blocking = Yes.blocking)
             else
                 enum timeout = 1000;
 
-            while(nn_poll(pds.ptr, pds.length, timeout).enforceNanoMsgRet == 0)
+            while(nn_poll(pds.ptr, pds.length.to!int, timeout).enforceNanoMsgRet == 0)
             {
                 static if (!blocking)
                 {
